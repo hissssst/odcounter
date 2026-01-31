@@ -79,9 +79,10 @@ defmodule ODCounter do
   """
   @spec init(name(), [init_option()]) :: :ok
   def init(name, opts \\ []) do
-    with {_, _} <- :persistent_term.put({__MODULE__, name}, []) do
+    with {_, _} <- :persistent_term.get({__MODULE__, name}, []) do
       raise ArgumentError, "ODCounter #{inspect(name)} is already initialized"
     end
+
     counters_opts = Keyword.get(opts, :counters, [])
     runtime_size = Keyword.get(opts, :runtime_size, 1024)
 

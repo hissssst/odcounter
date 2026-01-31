@@ -2,7 +2,7 @@ defmodule ODCounter.MixProject do
   use Mix.Project
 
   def version do
-    "1.0.0"
+    "1.0.1"
   end
 
   def description do
