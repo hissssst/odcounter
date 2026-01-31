@@ -2,16 +2,16 @@ name: CI Workflow
 
 on:
   pull_request:
-    branches: [ master ]
+    branches: [ main ]
   push:
-    branches: [ master ]
+    branches: [ main ]
 
 jobs:
   test:
     strategy:
       matrix:
         otp-version: ['28']
-        elixir-version: ['1.17', '1.18', '1.19']
+        elixir-version: ['1.18', '1.19']
     name: CI
     runs-on: ubuntu-latest
 
