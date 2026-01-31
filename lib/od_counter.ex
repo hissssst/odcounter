@@ -205,7 +205,7 @@ defmodule ODCounter do
 
       iex> ODCounter.init(:cats)
       iex> ODCounter.add(:cats, :tuxedo, 2)
-      iex> counters = ODCounter.counters(:dogs)
+      iex> counters = ODCounter.counters(:cats)
       iex> :counters.info(counters).size
       1025
   """
