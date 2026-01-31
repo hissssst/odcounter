@@ -17,6 +17,7 @@ defmodule ODCounter.MixProject do
       start_permanent: Mix.env() == :prod,
       description: description(),
       package: package(),
+      source_url: "https://github.com/hissssst/odcounter",
       docs: docs(),
       deps: deps()
     ]
