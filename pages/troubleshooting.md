@@ -12,8 +12,8 @@ It looks like this
     :persistent_term.get({ODCounter, <name>})
 ```
 
-And it means that you didn't call `ODCounter.init(<name>)`.
-Refer to `ODCounter.init/2` for more information
+And it means that you didn't call `ODCounter.init_schema(<name>)` or `ODCounter.new/3`.
+Refer to `ODCounter.init_schema/2` for more information
 
 ## counters array size is larger than the amount of keys I have
 
