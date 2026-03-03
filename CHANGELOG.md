@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.0.0
+
+* **BREAKING** changes interface, separating array schema from array
+
 ## 1.0.1
 
 * Fixes doctest

@@ -11,8 +11,48 @@ defmodule ODCounter do
   if it is not possible to detect the literal value at compile time,
   the association will be safely stored in `:persistent_term` in runtime.
 
-  It is possible to disable the runtime fallback by setting the `runtime_size` option of `init/2` to 0.
-  See `t:init_option/0` for more information
+  It is possible to disable the runtime fallback by setting the `runtime_size` option of `init_schema/2` to 0.
+  See `t:init_schema_option/0` for more information
+
+  ## Example
+
+  Lets count how often some user assesses specific features in our system.
+  First, we need to initialize the counters schema.
+  Think of it as of `CREATE TABLE` in SQL.
+
+  ```elixir
+  ODCounter.init_schema(:features_used)
+  ```
+
+  Then we need to create state which will hold counters of this schema.
+  Think of it as of adding a new row into the SQL table.
+
+  ```elixir
+  ODCounter.new(:features_used, "userID:12345")
+  ```
+
+  And now we can start counting things.
+  In terms of SQL metaphora, it is akin to updating cells in some rows
+
+  ```elixir
+  ODCounter.add(:features_used, "userID:12345", :2fa_github_login)
+  ODCounter.add(:features_used, "userID:12345", :click_on_suggestions, 2)
+  ...
+  ODCounter.add(:features_used, "userID:12345", :click_on_suggestions, 1)
+
+  feature_name = detect_the_feature_name(...)
+  ODCounter.add(:features_used, "userID:12345", feature_name)
+  ```
+
+  Please note that the last `add` call refers to specific counter dynamically.
+  Accessing such counters is a little bit slower than accessing counters which
+  are stated as literals in the arguments of `get/4`, `add/4` and so on, but
+  it is still quite efficient.
+
+  And now let's access what we counted
+  ```elixir
+  ODCounter.to_map(:features_user, "userID:12345")
+  ```
 
   > #### Warning {: .warning}
   >
@@ -22,21 +62,25 @@ defmodule ODCounter do
   > **Example:**
   > ```
   > very_large_list = Enum.to_list(1..1000)
-  > ODCounter.init(:structures)
-  > ODCounter.get(:structures, very_large_list) # very_large_list won't be garbage collected now
+  > ODCounter.init_schema(:structures)
+  > ODCounter.new(:structures, very_big_term) # very_big_term won't be garbage collected now
+  > ODCounter.get(:structures, very_big_term, very_large_list) # so is very_large_list now
   > ```
+  >
+  > This is true for all of the `get/4`, `sub/4`, `add/4`, `atoi/2` and `put/4` macros.
 
   > #### Tip {: .tip}
   >
   > In order to achieve maximum efficieny, you should pass keys as literals,
-  > not variables or function calls
+  > in the arguments, not variables or function calls
   >
   > **Example:**
   > ```
-  > ODCounter.init(:letters)
-  > ODCounter.add(:letters, :a) # fast
+  > ODCounter.init_schema(:letters)
+  > ODCounter.new(:letters, "in the email number 34")
+  > ODCounter.add(:letters, "in the email number 34", :a) # fast
   > b = :b
-  > ODCounter.add(:letters, b) # slow
+  > ODCounter.add(:letters, "in the email number 34", b) # slow
   > ```
   """
 
@@ -44,54 +88,113 @@ defmodule ODCounter do
     @moduledoc false
     def all(_), do: %{}
     def atoi(_, _), do: nil
-    def max(_name), do: 0
+    def max(_schema), do: 0
   end
 
   ## Runtime
 
-  @type name :: atom()
+  @type schema :: atom()
 
-  @type counter :: any()
+  @type name :: term()
+
+  @type counter :: term()
 
   @typedoc """
-  Options passed to the `init/4` function.
+  Options passed to the `init_schema/4` function.
 
-  * `counters` (`t:counters.init/0`) — A list of options passed to `:counters.new/2`.
+  * `ignore_if_exists` (`t:boolean/0`) — Function won't raise and will do nothing if schema is initialized.
   * `runtime_size` (`t:non_neg_integer/0`) — A maximum amount of counters which are added at runtime to be supported.
   Setting this value to `0` essentially disables the runtime counters
   """
-  @type init_option :: {:counters, list()}
-    | {:runtime_size, non_neg_integer()}
+  @type init_schema_option :: {:runtime_size, non_neg_integer()}
+    | {:ignore_if_exists, boolean()}
 
   @doc """
   Initializes the counters.
 
   ## Example
 
-      iex> ODCounter.init(MySuperCounter)
-      iex> ODCounter.get(MySuperCounter, :key)
+      iex> ODCounter.init_schema(MySuperCounter)
+      iex> ODCounter.new(MySuperCounter, "counter one")
+      iex> ODCounter.get(MySuperCounter, "counter one", :key)
       0
 
   * Every value of the counter is initialized to 0 by default
   * If the counter was initialized before, this function will fail with `ArgumentError`
 
-  Refer to `t:init_option/0` for information about `opts`
+  Refer to `t:init_schema_option/0` for information about `opts`
   """
-  @spec init(name(), [init_option()]) :: :ok
-  def init(name, opts \\ []) do
-    with {_, _} <- :persistent_term.get({__MODULE__, name}, []) do
-      raise ArgumentError, "ODCounter #{inspect(name)} is already initialized"
+  @spec init_schema(schema(), [init_schema_option()]) :: :ok
+  def init_schema(schema, opts \\ []) do
+    with(
+      {_, _} <- :persistent_term.get({__MODULE__.Schema, schema}, []),
+      false <- Keyword.get(opts, :ignore_if_exists, false)
+    ) do
+      raise ArgumentError, "ODCounter #{inspect(schema)} is already initialized"
     end
 
-    counters_opts = Keyword.get(opts, :counters, [])
     runtime_size = Keyword.get(opts, :runtime_size, 1024)
 
-    counters_ref = :counters.new(:odcounter_ct.max(name) + runtime_size, counters_opts)
-
     index_atomics_ref = :atomics.new(1, [])
-    :atomics.add(index_atomics_ref, 1, :odcounter_ct.max(name) + 1)
+    :atomics.add(index_atomics_ref, 1, :odcounter_ct.max(schema) + 1)
 
-    :persistent_term.put({__MODULE__, name}, {counters_ref, index_atomics_ref})
+    :persistent_term.put({__MODULE__.Schema, schema}, {index_atomics_ref, runtime_size})
+    :ok
+  end
+
+  @typedoc """
+  Options passed to the `new/3` function.
+
+  * `counters` (`t:list/0`) — A list of options passed to `:counters.new/2`.
+  * `ignore_if_exists` (`t:boolean/0`) — Function won't overwrite and will do nothing if array with this name is initialized.
+  """
+  @type new_option() :: {:counters, list()}
+  | {:ignore_if_exists, boolean()}
+
+  @doc """
+  Creates a new counters array of given schema. Creates or updates a `:persistent_term` entry.
+
+  ## Example
+
+     iex> ODCounter.init_schema(:luggage)
+     iex> ODCounter.new(:luggage, 1)
+
+  Refer to `t:new_option/0` for information about `opts`
+  """
+  @spec new(schema(), name(), [new_option()]) :: name
+  when name: name()
+  def new(schema, name, opts \\ []) do
+    counters_opts = Keyword.get(opts, :counters, [])
+    {_index_atomics_ref, runtime_size} = :persistent_term.get({__MODULE__.Schema, schema})
+
+    case :persistent_term.get({__MODULE__.State, schema, name}, nil) do
+      nil ->
+        counters_ref = :counters.new(:odcounter_ct.max(schema) + runtime_size, counters_opts)
+        :persistent_term.put({__MODULE__.State, schema, name}, counters_ref)
+
+      _counters_ref ->
+        unless Keyword.get(opts, :ignore_if_exists, false) do
+          counters_ref = :counters.new(:odcounter_ct.max(schema) + runtime_size, counters_opts)
+          :persistent_term.put({__MODULE__.State, schema, name}, counters_ref)
+        end
+    end
+
+    name
+  end
+
+  @doc """
+  Deletes an array of counters, removing an entry in `:persistent_term`
+
+  ## Example
+
+     iex> ODCounter.init_schema(ProgrammingLanguagesUsed)
+     iex> ODCounter.new(ProgrammingLanguagesUsed, :in_my_project)
+     iex> ODCounter.add(ProgrammingLanguagesUsed, :in_my_project, Elixir)
+     iex> ODCounter.delete(ProgrammingLanguagesUsed, :in_my_project)
+  """
+  @spec delete(schema(), name()) :: :ok
+  def delete(schema, name) do
+    :persistent_term.erase({__MODULE__.State, schema, name})
     :ok
   end
 
@@ -100,39 +203,53 @@ defmodule ODCounter do
 
   ## Example
 
-      iex> ODCounter.init(:sheeps)
-      iex> ODCounter.add(:sheeps, :jumped_over_the_fence, 1)
-      iex> ODCounter.get(:sheeps, :jumped_over_the_fence)
+      iex> ODCounter.init_schema(:sheeps)
+      iex> ODCounter.new(:sheeps, :in_dream)
+      iex> ODCounter.add(:sheeps, :in_dream, :jumped_over_the_fence, 1)
+      iex> ODCounter.get(:sheeps, :in_dream, :jumped_over_the_fence)
       1
-      iex> ODCounter.remove(:sheeps)
-      iex> ODCounter.get(:sheeps, :jumped_over_the_fence)
+      iex> ODCounter.remove_schema(:sheeps)
+      iex> ODCounter.get(:sheeps, :in_dream, :jumped_over_the_fence)
       ** (ArgumentError) errors were found at the given arguments:
       ...
   """
-  @spec remove(name()) :: :ok
-  def remove(name) do
-    :persistent_term.erase({__MODULE__, name})
-    for {{:odcounter, ^name, _counter} = key, _index} <- :persistent_term.get() do
-      :persistent_term.erase(key)
+  @spec remove_schema(schema()) :: :ok
+  def remove_schema(schema) do
+    :persistent_term.erase({__MODULE__.Schema, schema})
+
+    for kv <- :persistent_term.get() do
+      case kv do
+        {{:odcounter, ^schema, _} = key, _} ->
+          :persistent_term.erase(key)
+
+        {{__MODULE__.State, ^schema, _} = key, _} ->
+          :persistent_term.erase(key)
+
+        _ ->
+          []
+      end
     end
+
     :ok
   end
 
   @doc """
-  Resets all counters in the namespace to 0 (or `to`)
+  Resets all counters in the schemaspace to 0 (or `to`)
 
   ## Example
 
-      iex> ODCounter.init(:errors)
-      iex> ODCounter.add(:errors, 400)
-      iex> ODCounter.add(:errors, 500, 5)
-      iex> ODCounter.reset(:errors)
-      iex> ODCounter.to_map(:errors)
+      iex> ODCounter.init_schema(:errors)
+      iex> ODCounter.new(:errors, :user_1)
+      iex> ODCounter.add(:errors, :user_1, 400)
+      iex> ODCounter.add(:errors, :user_1, 500, 5)
+      iex> ODCounter.reset(:errors, :user_1)
+      iex> ODCounter.to_map(:errors, :user_1)
       %{}
   """
-  @spec reset(name()) :: :ok
-  def reset(name, to \\ 0) do
-    {counters_ref, index_atomics_ref} = :persistent_term.get({__MODULE__, name})
+  @spec reset(schema(), name(), integer()) :: :ok
+  def reset(schema, name, to \\ 0) do
+    {index_atomics_ref, _} = :persistent_term.get({__MODULE__.Schema, schema})
+    counters_ref = :persistent_term.get({__MODULE__.State, schema, name})
     max = :atomics.get(index_atomics_ref, 1)
 
     for i <- 1..max//1 do
@@ -148,23 +265,24 @@ defmodule ODCounter do
 
   ## Example
 
-      iex> ODCounter.init(:requests)
-      iex> ODCounter.add(:requests, 200)
-      iex> ODCounter.add(:requests, 400, 5)
-      iex> ODCounter.to_map(:requests)
+      iex> ODCounter.init_schema(:requests)
+      iex> ODCounter.new(:requests, "service-1")
+      iex> ODCounter.add(:requests, "service-1", 200)
+      iex> ODCounter.add(:requests, "service-1", 400, 5)
+      iex> ODCounter.to_map(:requests, "service-1")
       %{200 => 1, 400 => 5}
   """
-  @spec to_map(name()) :: %{counter() => integer()}
-  def to_map(name) do
-    {counters_ref, _} = :persistent_term.get({__MODULE__, name})
+  @spec to_map(schema(), name()) :: %{counter() => integer()}
+  def to_map(schema, name) do
+    counters_ref = :persistent_term.get({__MODULE__.State, schema, name})
 
     map =
-      Map.new(:odcounter_ct.all(name), fn {counter, index} ->
+      Map.new(:odcounter_ct.all(schema), fn {counter, index} ->
         {counter, :counters.get(counters_ref, index)}
       end)
 
     map =
-      for {{:odcounter, ^name, counter}, index} <- :persistent_term.get(), into: map do
+      for {{:odcounter, ^schema, counter}, index} <- :persistent_term.get(), into: map do
         {counter, :counters.get(counters_ref, index)}
       end
 
@@ -181,20 +299,21 @@ defmodule ODCounter do
   @doc """
   Returns information which can be used for debugging the ODCounter behaviour
   """
-  @spec info(name()) :: info()
-  def info(name) do
-    {counters_ref, index_atomics_ref} = :persistent_term.get({__MODULE__, name})
+  @spec info(schema(), name()) :: info()
+  def info(schema, name) do
+    {index_atomics_ref, _} = :persistent_term.get({__MODULE__.Schema, schema})
+    counters_ref = :persistent_term.get({__MODULE__.State, schema, name})
     max = :atomics.get(index_atomics_ref, 1)
 
     runtime_indexes =
-      for {{:odcounter, ^name, counter}, index} <- :persistent_term.get(), into: %{} do
+      for {{:odcounter, ^schema, counter}, index} <- :persistent_term.get(), into: %{} do
         {counter, index}
       end
 
     %{
       counters_info: :counters.info(counters_ref),
       current_max_index: max,
-      compile_time_indexes: :odcounter_ct.all(name),
+      compile_time_indexes: :odcounter_ct.all(schema),
       runtime_indexes: runtime_indexes
     }
   end
@@ -204,52 +323,53 @@ defmodule ODCounter do
 
   ## Example
 
-      iex> ODCounter.init(:cats)
-      iex> ODCounter.add(:cats, :tuxedo, 2)
-      iex> counters = ODCounter.counters(:cats)
+      iex> ODCounter.init_schema(:cats)
+      iex> ODCounter.new(:cats, {:in_house, "userID:12345"})
+      iex> ODCounter.add(:cats, {:in_house, "userID:12345"}, :tuxedo, 2)
+      iex> counters = ODCounter.counters(:cats, {:in_house, "userID:12345"})
       iex> :counters.info(counters).size
       1025
   """
-  @spec counters(name()) :: :counters.counters_ref()
-  def counters(name) do
-    {counters_ref, _index_atomics_ref} = :persistent_term.get({__MODULE__, name})
-    counters_ref
+  @spec counters(schema(), name()) :: :counters.counters_ref()
+  def counters(schema, name) do
+    :persistent_term.get({__MODULE__.State, schema, name})
   end
 
   @doc false
-  def do_add(name, index, amount) do
-    {counters_ref, _} = :persistent_term.get({__MODULE__, name})
+  def do_add(schema, name, index, amount) do
+    counters_ref = :persistent_term.get({__MODULE__.State, schema, name})
     :counters.add(counters_ref, index, amount)
     :ok
   end
 
   @doc false
-  def do_put(name, index, value) do
-    {counters_ref, _} = :persistent_term.get({__MODULE__, name})
+  def do_put(schema, name, index, value) do
+    counters_ref = :persistent_term.get({__MODULE__.State, schema, name})
     :counters.put(counters_ref, index, value)
     :ok
   end
 
   @doc false
-  def do_get(name, index) do
-    {counters_ref, _} = :persistent_term.get({__MODULE__, name})
+  def do_get(schema, name, index) do
+    counters_ref = :persistent_term.get({__MODULE__.State, schema, name})
     :counters.get(counters_ref, index)
   end
 
   @doc false
-  def do_atoi(name, counter) do
-    with nil <- ct_atoi(name, counter) do
-      rt_atoi(name, counter)
+  def do_atoi(schema, counter) do
+    with nil <- ct_atoi(schema, counter) do
+      rt_atoi(schema, counter)
     end
   end
 
-  defp rt_atoi(name, counter) do
-    key = {:odcounter, name, counter}
+  defp rt_atoi(schema, counter) do
+    key = {:odcounter, schema, counter}
     with [] <- :persistent_term.get(key, []) do
-      {counters_ref, index_atomics_ref} = :persistent_term.get({__MODULE__, name})
+      {index_atomics_ref, runtime_size} = :persistent_term.get({__MODULE__.Schema, schema})
+      max_size = runtime_size + :odcounter_ct.max(schema)
       new_index = :atomics.add_get(index_atomics_ref, 1, 1)
 
-      if new_index >= :counters.info(counters_ref).size do
+      if new_index >= max_size do
         :atomics.sub(index_atomics_ref, 1, 1)
         raise "Runtime counters overflow"
       end
@@ -259,8 +379,8 @@ defmodule ODCounter do
     end
   end
 
-  defp ct_atoi(name, counter) do
-    :odcounter_ct.atoi(name, counter)
+  defp ct_atoi(schema, counter) do
+    :odcounter_ct.atoi(schema, counter)
   end
 
   ## Compile-time
@@ -284,30 +404,30 @@ defmodule ODCounter do
     end
   end
 
-  defp get_or_create_index(agent, name, counter) do
+  defp get_or_create_index(agent, schema, counter) do
     Agent.get_and_update(agent, fn state ->
       case state do
-        %{^name => %{^counter => index}} ->
+        %{^schema => %{^counter => index}} ->
           {index, state}
 
-        %{^name => in_name} ->
-          index = map_size(in_name) + 1
-          state = Map.put(state, name, Map.put(in_name, counter, index))
+        %{^schema => in_schema} ->
+          index = map_size(in_schema) + 1
+          state = Map.put(state, schema, Map.put(in_schema, counter, index))
           File.write!(counter_tab_fname(), :erlang.term_to_binary(state))
           {index, state}
 
         state ->
           index = 1
-          state = Map.put(state, name, %{counter => index})
+          state = Map.put(state, schema, %{counter => index})
           File.write!(counter_tab_fname(), :erlang.term_to_binary(state))
           {index, state}
       end
     end)
   end
 
-  defp add_or_get_ct_counter(name, counter) do
+  defp add_or_get_ct_counter(schema, counter) do
     agent = get_or_start_agent()
-    get_or_create_index(agent, name, counter)
+    get_or_create_index(agent, schema, counter)
   end
 
   @doc """
@@ -315,20 +435,21 @@ defmodule ODCounter do
 
   ## Example
 
-      iex> ODCounter.init(:dogs)
-      iex> ODCounter.add(:dogs, :chiuaua, 42)
+      iex> ODCounter.init_schema(:dogs)
+      iex> ODCounter.new(:dogs, {"user_owns", "userID:12345"})
+      iex> ODCounter.add(:dogs, {"user_owns", "userID:12345"}, :chiuaua, 42)
       iex> index = ODCounter.atoi(:dogs, :chiuaua)
-      iex> :counters.get(ODCounter.counters(:dogs), index)
+      iex> :counters.get(ODCounter.counters(:dogs, {"user_owns", "userID:12345"}), index)
       42
   """
-  defmacro atoi(name, counter) do
-    name = Macro.expand(name, __CALLER__)
+  defmacro atoi(schema, counter) do
+    schema = Macro.expand(schema, __CALLER__)
 
-    unless is_atom(name) do
+    unless is_atom(schema) do
       raise CompileError,
         file: __CALLER__.file,
         line: __CALLER__.line,
-        description: "Name must be a compile-time atom. Got #{Code.format_string! Macro.to_string(name)}"
+        description: "Name must be a compile-time atom. Got #{Code.format_string! Macro.to_string(schema)}"
     end
 
     counter = Macro.expand(counter, __CALLER__)
@@ -339,15 +460,15 @@ defmodule ODCounter do
         {counter, [], _} = Code.eval_quoted_with_env(counter, [], prepared_caller_env)
 
         if __CALLER__.module != nil do
-          Module.put_attribute(__CALLER__.module, :after_compile, {__MODULE__, :c_hook})
+          Module.put_attribute(__CALLER__.module, :before_compile, {__MODULE__, :c_hook})
         end
 
-        index = add_or_get_ct_counter(name, counter)
+        index = add_or_get_ct_counter(schema, counter)
         index
 
       false ->
         quote do
-          unquote(__MODULE__).do_atoi(unquote(name), unquote(counter))
+          unquote(__MODULE__).do_atoi(unquote(schema), unquote(counter))
         end
     end
   end
@@ -357,27 +478,29 @@ defmodule ODCounter do
 
   ## Example
 
-      iex> ODCounter.init(:things)
-      iex> ODCounter.add(:things, :some_thing) # Default is to add 1
-      iex> ODCounter.add(:things, :some_thing, 2)
-      iex> ODCounter.get(:things, :some_thing)
+      iex> ODCounter.init_schema(:things)
+      iex> ODCounter.new(:things, :here)
+      iex> ODCounter.add(:things, :here, :some_thing) # Default is to add 1
+      iex> ODCounter.add(:things, :here, :some_thing, 2)
+      iex> ODCounter.get(:things, :here, :some_thing)
       3
   """
-  defmacro add(name, counter, amount \\ 1) do
+  defmacro add(schema, name, counter, amount \\ 1) do
     quote do
-      index = unquote(__MODULE__).atoi(unquote(name), unquote(counter))
-      unquote(__MODULE__).do_add(unquote(name), index, unquote(amount))
+      name = unquote(name)
+      index = unquote(__MODULE__).atoi(unquote(schema), unquote(counter))
+      unquote(__MODULE__).do_add(unquote(schema), name, index, unquote(amount))
       :ok
     end
   end
 
   @doc """
-  Decreases the `counter` value by `amount`. It expands to `add(name, counter, -amount)`.
+  Decreases the `counter` value by `amount`. It expands to `add(schema, counter, -amount)`.
   Refer to `add/3` for more information
   """
-  defmacro sub(name, counter, amount \\ 1) do
+  defmacro sub(schema, name, counter, amount \\ 1) do
     quote do
-      unquote(__MODULE__).add(unquote(name), unquote(counter), -unquote(amount))
+      unquote(__MODULE__).add(unquote(schema), unquote(name), unquote(counter), -unquote(amount))
     end
   end
 
@@ -386,17 +509,19 @@ defmodule ODCounter do
 
   ## Example
 
-      iex> ODCounter.init(:clock)
-      iex> ODCounter.put(:clock, :hours, 13)
-      iex> ODCounter.put(:clock, :minutes, 44)
-      iex> ODCounter.put(:clock, :seconds, 59)
-      iex> ODCounter.to_map(:clock)
+      iex> ODCounter.init_schema(:clock)
+      iex> ODCounter.new(:clock, {"user-wristwatch", 1883})
+      iex> ODCounter.put(:clock, {"user-wristwatch", 1883}, :hours, 13)
+      iex> ODCounter.put(:clock, {"user-wristwatch", 1883}, :minutes, 44)
+      iex> ODCounter.put(:clock, {"user-wristwatch", 1883}, :seconds, 59)
+      iex> ODCounter.to_map(:clock, {"user-wristwatch", 1883})
       %{hours: 13, minutes: 44, seconds: 59}
   """
-  defmacro put(name, counter, value) do
+  defmacro put(schema, name, counter, value) do
     quote do
-      index = unquote(__MODULE__).atoi(unquote(name), unquote(counter))
-      unquote(__MODULE__).do_put(unquote(name), index, unquote(value))
+      name = unquote(name)
+      index = unquote(__MODULE__).atoi(unquote(schema), unquote(counter))
+      unquote(__MODULE__).do_put(unquote(schema), name, index, unquote(value))
       :ok
     end
   end
@@ -406,68 +531,72 @@ defmodule ODCounter do
 
   ## Example
 
-      iex> ODCounter.init(:animals)
-      iex> ODCounter.add(:animals, :cows)
-      iex> ODCounter.add(:animals, :cows, 5)
-      iex> ODCounter.get(:animals, :cows)
+      iex> ODCounter.init_schema(:animals)
+      iex> ODCounter.new(:animals, :farm)
+      iex> ODCounter.add(:animals, :farm, :cows)
+      iex> ODCounter.add(:animals, :farm, :cows, 5)
+      iex> ODCounter.get(:animals, :farm, :cows)
       6
-      iex> ODCounter.get(:animals, :parrots)
+      iex> ODCounter.get(:animals, :farm, :parrots)
       0
   """
-  defmacro get(name, counter) do
+  defmacro get(schema, name, counter) do
     quote do
-      index = unquote(__MODULE__).atoi(unquote(name), unquote(counter))
-      unquote(__MODULE__).do_get(unquote(name), index)
+      name = unquote(name)
+      index = unquote(__MODULE__).atoi(unquote(schema), unquote(counter))
+      unquote(__MODULE__).do_get(unquote(schema), name, index)
     end
   end
 
   @doc false
-  def c_hook(_env, _bytecode) do
-    change_back? =
-      case Code.get_compiler_option(:ignore_module_conflict) do
-        true ->
-          false
+  def c_hook(env) do
+    unless Module.get_attribute(env.module, :odcounter_chook_called, false) do
+      Module.put_attribute(env.module, :odcounter_chook_called, true)
 
-        false ->
-          Code.put_compiler_option(:ignore_module_conflict, true)
-          true
-      end
+      change_back? =
+        case Code.get_compiler_option(:ignore_module_conflict) do
+          true ->
+            false
 
-    try do
-      defmodule :odcounter_ct do
-        @moduledoc false
-
-        agent = ODCounter.get_or_start_agent()
-
-        @all Agent.get(agent, &Function.identity/1)
-        @max Map.new(@all, fn {name, in_name} -> {name, Enum.max(Map.values(in_name), &>=/2, fn -> 0 end)} end)
-
-        # IO.inspect @all, label: :generating
-
-        for {name, in_name} <- @all do
-          @name name
-          @in_name in_name
-
-          def all(@name), do: @in_name
+          false ->
+            Code.put_compiler_option(:ignore_module_conflict, true)
+            true
         end
 
-        for {name, in_name} <- @all, {counter, index} <- in_name do
-          @name name
-          @counter counter
-          @index index
+      try do
+        defmodule :odcounter_ct do
+          @moduledoc false
 
-          def atoi(@name, @counter), do: @index
+          agent = ODCounter.get_or_start_agent()
+
+          @all Agent.get(agent, &Function.identity/1)
+          @max Map.new(@all, fn {schema, in_schema} -> {schema, Enum.max(Map.values(in_schema), &>=/2, fn -> 0 end)} end)
+
+          for {schema, in_schema} <- @all do
+            @schema schema
+            @in_schema in_schema
+
+            def all(@schema), do: @in_schema
+          end
+
+          for {schema, in_schema} <- @all, {counter, index} <- in_schema do
+            @schema schema
+            @counter counter
+            @index index
+
+            def atoi(@schema, @counter), do: @index
+          end
+
+          def atoi(_, _), do: nil
+
+          def max(schema) do
+            Map.get(@max, schema, 0)
+          end
         end
-
-        def atoi(_, _), do: nil
-
-        def max(name) do
-          Map.get(@max, name, 0)
+      after
+        if change_back? do
+          Code.put_compiler_option(:ignore_module_conflict, false)
         end
-      end
-    after
-      if change_back? do
-        Code.put_compiler_option(:ignore_module_conflict, false)
       end
     end
   end

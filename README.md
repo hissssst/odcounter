@@ -5,13 +5,14 @@ A `:counters`, but with namespaces and terms as names
 ## Usage
 
 ```elixir
-iex> ODCounter.init(Metrics)
-iex> ODCounter.add(Metrics, :requests, 5)
-iex> ODCounter.get(Metrics, :requests)
+iex> ODCounter.init_schema(Metrics)
+iex> ODCounter.new(Metrics, :my_app)
+iex> ODCounter.add(Metrics, :my_app, :requests, 5)
+iex> ODCounter.get(Metrics, :my_app, :requests)
 5
-iex> ODCounter.add(Metrics, :succeeded_requests, 4)
-iex> ODCounter.add(Metrics, :failed_requests, 1)
-iex> ODCounter.to_map(Metrics)
+iex> ODCounter.add(Metrics, :my_app, :succeeded_requests, 4)
+iex> ODCounter.add(Metrics, :my_app, :failed_requests, 1)
+iex> ODCounter.to_map(Metrics, :my_app)
 %{requests: 5, succeeded_requests: 4, failed_requests: 1}
 ```
 
@@ -33,7 +34,7 @@ iex> ODCounter.to_map(Metrics)
 ```elixir
 def deps do
   [
-    {:odcounter, "~> 0.1.0"}
+    {:odcounter, "~> 2.0"}
   ]
 end
 ```
